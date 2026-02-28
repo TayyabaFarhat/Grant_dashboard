@@ -1,0 +1,96 @@
+name: Auto-Update Opportunities
+
+on:
+  schedule:
+    # Run every day at midnight UTC
+    - cron: "0 0 * * *"
+  workflow_dispatch: # Allow manual trigger from GitHub UI
+    inputs:
+      reason:
+        description: "Reason for manual run"
+        required: false
+        default: "Manual update"
+
+permissions:
+  contents: write
+
+jobs:
+  update-opportunities:
+    name: Scrape & Update Opportunities
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r scraper/requirements.txt
+
+      - name: Run Scraper
+        run: |
+          echo "Starting opportunity scraper at $(date)"
+          python scraper/scraper.py
+          echo "Scraper finished at $(date)"
+        env:
+          PYTHONUNBUFFERED: "1"
+
+      - name: Validate JSON Output
+        run: |
+          python -c "
+          import json, sys
+          with open('opportunities.json') as f:
+              data = json.load(f)
+          count = len(data.get('opportunities', []))
+          print(f'✓ Valid JSON: {count} opportunities')
+          if count == 0:
+              print('WARNING: No opportunities found')
+              sys.exit(1)
+          "
+
+      - name: Check for Changes
+        id: check_changes
+        run: |
+          git diff --quiet opportunities.json || echo "changed=true" >> $GITHUB_OUTPUT
+
+      - name: Commit and Push Changes
+        if: steps.check_changes.outputs.changed == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "LaunchPad Bot"
+          git add opportunities.json
+          TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
+          COUNT=$(python -c "import json; d=json.load(open('opportunities.json')); print(len(d['opportunities']))")
+          git commit -m "🚀 Auto-update: ${COUNT} opportunities [${TIMESTAMP}]"
+          git push
+
+      - name: No Changes Notice
+        if: steps.check_changes.outputs.changed != 'true'
+        run: echo "ℹ️ No new opportunities found. opportunities.json unchanged."
+
+      - name: Summary
+        run: |
+          python -c "
+          import json
+          with open('opportunities.json') as f:
+              data = json.load(f)
+          opps = data['opportunities']
+          print(f'📊 Dashboard Summary:')
+          print(f'   Total: {len(opps)}')
+          print(f'   Grants: {sum(1 for o in opps if o.get(\"type\")==\"grant\")}')
+          print(f'   Competitions: {sum(1 for o in opps if o.get(\"type\")==\"competition\")}')
+          print(f'   Accelerators: {sum(1 for o in opps if o.get(\"type\")==\"accelerator\")}')
+          print(f'   Hackathons: {sum(1 for o in opps if o.get(\"type\")==\"hackathon\")}')
+          print(f'   Updated: {data.get(\"last_updated\", \"unknown\")}')
+          "
